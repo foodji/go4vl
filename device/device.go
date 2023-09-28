@@ -116,6 +116,10 @@ func Open(path string, options ...Option) (*Device, error) {
 	return dev, nil
 }
 
+func (d *Device) Streaming() bool {
+	return d.streaming
+}
+
 // Close closes the underlying device associated with `d` .
 func (d *Device) Close() error {
 	if d.streaming {
