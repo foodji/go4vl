@@ -444,10 +444,14 @@ func (d *Device) startStreamLoop(ctx context.Context) error {
 }
 
 func (d *Device) stopStreamLoop() error {
-	if err := v4l2.UnmapMemoryBuffers(d); err != nil {
+	if err := v4l2.StreamOff(d); err != nil {
+
+		if uerr := v4l2.UnmapMemoryBuffers(d); uerr != nil {
+			return fmt.Errorf("%w", uerr, err)
+		}
 		return err
 	}
-	if err := v4l2.StreamOff(d); err != nil {
+	if err := v4l2.UnmapMemoryBuffers(d); err != nil {
 		return err
 	}
 	return nil
