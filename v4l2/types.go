@@ -13,6 +13,7 @@ type Device interface {
 	GetOutput() <-chan []byte
 	SetInput(<-chan []byte)
 	Close() error
+	Streaming() bool
 }
 
 // StreamingDevice represents device that supports streaming IO
