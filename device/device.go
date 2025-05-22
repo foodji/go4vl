@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	sys "syscall"
+	"time"
 
 	"github.com/vladimirvivien/go4vl/v4l2"
 )
@@ -59,6 +60,9 @@ func Open(path string, options ...Option) (*Device, error) {
 
 	// only supports streaming IO model right now
 	if !dev.cap.IsStreamingSupported() {
+		if err := v4l2.CloseDevice(dev.fd); err != nil {
+			return nil, fmt.Errorf("device closing: %s: device does not support streamingIO: %s", path, err)
+		}
 		return nil, fmt.Errorf("device open: device does not support streamingIO")
 	}
 
@@ -77,7 +81,10 @@ func Open(path string, options ...Option) (*Device, error) {
 	}
 
 	if dev.config.bufType != 0 && dev.config.bufType != dev.bufType {
-		return nil, fmt.Errorf("device open: does not support buffer stream type")
+		if err := v4l2.CloseDevice(dev.fd); err != nil {
+			return nil, fmt.Errorf("device open: %s: error on closing device: device does not support buffer stream type: %s", path, err)
+		}
+		return nil, fmt.Errorf("device %s open: device does not support buffer stream type %v", path, dev.bufType)
 	}
 
 	// ensures IOType is set, only MemMap supported now
@@ -93,11 +100,17 @@ func Open(path string, options ...Option) (*Device, error) {
 	// set pix format
 	if dev.config.pixFormat != (v4l2.PixFormat{}) {
 		if err := dev.SetPixFormat(dev.config.pixFormat); err != nil {
+			if err := v4l2.CloseDevice(dev.fd); err != nil {
+				return nil, fmt.Errorf("device open: %s: error on closing device: set format: %s", path, err)
+			}
 			return nil, fmt.Errorf("device open: %s: set format: %w", path, err)
 		}
 	} else {
 		dev.config.pixFormat, err = v4l2.GetPixFormat(dev.fd)
 		if err != nil {
+			if err := v4l2.CloseDevice(dev.fd); err != nil {
+				return nil, fmt.Errorf("device open: %s: error on closing device: get default format: %s", path, err)
+			}
 			return nil, fmt.Errorf("device open: %s: get default format: %w", path, err)
 		}
 	}
@@ -105,10 +118,16 @@ func Open(path string, options ...Option) (*Device, error) {
 	// set fps
 	if dev.config.fps != 0 {
 		if err := dev.SetFrameRate(dev.config.fps); err != nil {
+			if err := v4l2.CloseDevice(dev.fd); err != nil {
+				return nil, fmt.Errorf("device open: %s: error on closing device: closing on set fps: %s", path, err)
+			}
 			return nil, fmt.Errorf("device open: %s: set fps: %w", path, err)
 		}
 	} else {
 		if dev.config.fps, err = dev.GetFrameRate(); err != nil {
+			if err := v4l2.CloseDevice(dev.fd); err != nil {
+				return nil, fmt.Errorf("device open: %s: error on closing device: closing on get fps: %s", path, err)
+			}
 			return nil, fmt.Errorf("device open: %s: get fps: %w", path, err)
 		}
 	}
@@ -382,6 +401,7 @@ func (d *Device) Stop() error {
 // and report any errors. The loop runs in a separate goroutine and uses the sys.Select to trigger
 // capture events.
 func (d *Device) startStreamLoop(ctx context.Context) error {
+	fmt.Printf("%s start stream loop: starting\n", time.Now().Format("2006/01/02 15:04:05"))
 	d.output = make(chan []byte, d.config.bufSize)
 
 	// Initial enqueue of buffers for capture
@@ -397,7 +417,10 @@ func (d *Device) startStreamLoop(ctx context.Context) error {
 	}
 
 	go func() {
-		defer close(d.output)
+		defer func() {
+			fmt.Printf("%s start stream loop: closing output channel\n", time.Now().Format("2006/01/02 15:04:05"))
+			close(d.output)
+		}()
 
 		fd := d.Fd()
 		var frame []byte
@@ -408,21 +431,31 @@ func (d *Device) startStreamLoop(ctx context.Context) error {
 			select {
 			// handle stream capture (read from driver)
 			case <-waitForRead:
+				fmt.Printf("%s start stream loop: waiting for read\n", time.Now().Format("2006/01/02 15:04:05"))
 				buff, err := v4l2.DequeueBuffer(fd, ioMemType, bufType)
 				if err != nil {
 					if errors.Is(err, sys.EAGAIN) {
 						continue
 					}
-					fmt.Printf("(Panic) device: stream loop dequeue: %s\n", err)
+					fmt.Printf("%s (Panic prevention) device: stream loop dequeue: %s, ioMemType: %v, bufType: %v\n", time.Now().Format("2006/01/02 15:04:05"), err, ioMemType, bufType)
 					return
 				}
 
 				// copy mapped buffer (copying avoids polluted data from subsequent dequeue ops)
 				if buff.Flags&v4l2.BufFlagMapped != 0 && buff.Flags&v4l2.BufFlagError == 0 {
 					frame = make([]byte, buff.BytesUsed)
-					if n := copy(frame, d.buffers[buff.Index][:buff.BytesUsed]); n == 0 {
+					fmt.Printf("%s start stream loop: copy frame before: buffersLen: %v, buffIndex: %v, buffers[buff.Index].cap: %v, buffBytesUsed: %v\n", time.Now().Format("2006/01/02 15:04:05"), len(d.buffers), buff.Index, cap(d.buffers[buff.Index]), buff.BytesUsed)
+					if uint32(len(d.buffers)) <= buff.Index || uint32(cap(d.buffers[buff.Index])) < buff.BytesUsed {
+						fmt.Printf("%s (Panic prevented) start stream loop: copy frame error: buffer capacity issue: buffersLen: %v, buffIndex: %v, buffers[buff.Index].cap: %v, buffBytesUsed: %v\n", time.Now().Format("2006/01/02 15:04:05"), len(d.buffers), buff.Index, cap(d.buffers[buff.Index]), buff.BytesUsed)
+						return
+					}
+					frameBuffers := d.buffers[buff.Index][:buff.BytesUsed]
+					fmt.Printf("%s start stream loop: copy frame: slice allocated: buffersLen: %v, buffIndex: %v, buffBytesUsed: %v\n", time.Now().Format("2006/01/02 15:04:05"), len(frameBuffers), buff.Index, buff.BytesUsed)
+					if n := copy(frame, frameBuffers); n == 0 {
+						fmt.Printf("%s start stream loop: copy error: %v, buffIndex: %v, buffBytesUsed: %v\n", time.Now().Format("2006/01/02 15:04:05"), n, buff.Index, buff.BytesUsed)
 						d.output <- []byte{}
 					}
+					fmt.Printf("%s start stream loop: copy frame after: frameLen: %v, buffIndex: %v, buffBytesUsed: %v\n", time.Now().Format("2006/01/02 15:04:05"), len(frame), buff.Index, buff.BytesUsed)
 					d.output <- frame
 					frame = nil
 				} else {
@@ -434,6 +467,7 @@ func (d *Device) startStreamLoop(ctx context.Context) error {
 					return
 				}
 			case <-ctx.Done():
+				fmt.Printf("%s start stream loop: context done\n", time.Now().Format("2006/01/02 15:04:05"))
 				d.stopStreamLoop()
 				return
 			}
